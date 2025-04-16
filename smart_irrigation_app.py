@@ -5,6 +5,9 @@ import networkx as nx
 import heapq
 import random
 from datetime import datetime, timedelta
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation
+from database import IrrigationDatabase
 
 class SmartIrrigationSystem:
     def __init__(self, num_zones=6):
@@ -16,12 +19,25 @@ class SmartIrrigationSystem:
         self.reservoir_capacity = 100
         self.irrigation_schedule = []
         self.current_time = datetime.now()
+        self.db = IrrigationDatabase()
+        
+        # Clear existing zones and data
+        self.db.clear_zones()
+        
+        # Initialize database with system configuration
+        self.db.save_system_config(num_zones, self.reservoir_capacity)
         
         # Generate zones with initial moisture levels and positions
         self.generate_zones()
         
         # Generate connections between zones (graph edges)
         self.generate_graph()
+        
+        # Initialize system status in database
+        self.db.update_system_status(self.reservoir_level, "active")
+        
+        # Generate and save initial weather data
+        self.generate_weather_data()
     
     def generate_zones(self):
         """Generate irrigation zones with random positions and moisture levels"""
@@ -55,7 +71,6 @@ class SmartIrrigationSystem:
             crop_type = random.choice(zone_types)
             
             # Calculate water requirement based on moisture level and area
-            # The lower the moisture, the higher the requirement
             water_requirement = (100 - moisture) * area / 100
             
             self.zones[i] = {
@@ -67,6 +82,12 @@ class SmartIrrigationSystem:
                 'crop_type': crop_type,
                 'area': area
             }
+            
+            # Save zone to database
+            self.db.save_zone(i, area, soil_type, crop_type, 30.0)  # Default moisture threshold
+            
+            # Save initial moisture reading
+            self.db.save_moisture_reading(i, moisture)
     
     def generate_graph(self):
         """Generate the graph representing connections between zones"""
@@ -159,14 +180,26 @@ class SmartIrrigationSystem:
         return path[::-1]
     
     def update_moisture_levels(self):
-        """Simulate natural moisture loss over time"""
-        for i in range(1, self.num_zones + 1):
-            # Moisture decreases by 0.5-2% randomly
-            moisture_loss = random.uniform(0.5, 2)
-            self.zones[i]['moisture'] = max(0, self.zones[i]['moisture'] - moisture_loss)
+        """Update moisture levels based on weather and time"""
+        # Get latest weather conditions
+        weather = self.db.get_latest_weather_conditions()
+        if weather:
+            temperature, humidity, rainfall, _ = weather
             
-            # Update water requirement based on new moisture level
-            self.zones[i]['water_requirement'] = (100 - self.zones[i]['moisture']) * self.zones[i]['area'] / 100
+            # Update moisture based on weather
+            for i in range(1, self.num_zones + 1):
+                # Natural moisture loss
+                moisture_loss = 0.5 * (temperature / 30) * (1 - humidity/100)
+                
+                # Rain effect
+                moisture_gain = rainfall * 0.1
+                
+                # Update moisture level
+                self.zones[i]['moisture'] = max(0, min(100, 
+                    self.zones[i]['moisture'] - moisture_loss + moisture_gain))
+                
+                # Save moisture reading to database
+                self.db.save_moisture_reading(i, self.zones[i]['moisture'])
     
     def irrigate_zone(self, zone_id, amount):
         """Irrigate a specific zone with a given amount of water"""
@@ -178,10 +211,17 @@ class SmartIrrigationSystem:
             moisture_increase = amount * 100 / self.zones[zone_id]['area']
             
             # Update zone moisture (cap at 100%)
-            self.zones[zone_id]['moisture'] = min(100, self.zones[zone_id]['moisture'] + moisture_increase)
+            self.zones[zone_id]['moisture'] = min(100, 
+                self.zones[zone_id]['moisture'] + moisture_increase)
             
-            # Update water requirement
-            self.zones[zone_id]['water_requirement'] = (100 - self.zones[zone_id]['moisture']) * self.zones[zone_id]['area'] / 100
+            # Save irrigation event to database
+            self.db.save_irrigation_event(zone_id, amount, datetime.now())
+            
+            # Save updated moisture reading
+            self.db.save_moisture_reading(zone_id, self.zones[zone_id]['moisture'])
+            
+            # Update system status
+            self.db.update_system_status(self.reservoir_level, "active")
             
             return True
         else:
@@ -241,6 +281,10 @@ class SmartIrrigationSystem:
             amount = self.reservoir_capacity - self.reservoir_level
         
         self.reservoir_level = min(self.reservoir_capacity, self.reservoir_level + amount)
+        
+        # Update system status
+        self.db.update_system_status(self.reservoir_level, "active")
+        
         st.success(f"Reservoir refilled. Current level: {self.reservoir_level:.2f} units")
     
     def simulate_day(self, days=1):
@@ -256,6 +300,9 @@ class SmartIrrigationSystem:
             
             # 3 irrigation cycles per day
             for cycle in range(3):
+                # Update weather data
+                self.update_weather_data()
+                
                 # Update moisture levels (simulate natural loss)
                 self.update_moisture_levels()
                 
@@ -499,8 +546,44 @@ class SmartIrrigationSystem:
         
         return report
 
+    def generate_weather_data(self):
+        """Generate and save random weather data"""
+        # Generate random weather conditions
+        temperature = random.uniform(15, 35)  # Temperature between 15°C and 35°C
+        humidity = random.uniform(30, 90)     # Humidity between 30% and 90%
+        rainfall = random.uniform(0, 5)       # Rainfall between 0 and 5 mm/h
+        
+        # Save weather data to database
+        self.db.save_weather_condition(temperature, humidity, rainfall)
+        
+        return temperature, humidity, rainfall
+    
+    def update_weather_data(self):
+        """Update weather data with slight variations"""
+        # Get current weather
+        current_weather = self.db.get_latest_weather_conditions()
+        if current_weather:
+            current_temp, current_humidity, current_rainfall, _ = current_weather
+            
+            # Generate new weather with slight variations
+            temperature = max(15, min(35, current_temp + random.uniform(-2, 2)))
+            humidity = max(30, min(90, current_humidity + random.uniform(-5, 5)))
+            rainfall = max(0, min(5, current_rainfall + random.uniform(-0.5, 0.5)))
+        else:
+            # If no current weather data, generate new
+            temperature = random.uniform(15, 35)
+            humidity = random.uniform(30, 90)
+            rainfall = random.uniform(0, 5)
+        
+        # Save new weather data
+        self.db.save_weather_condition(temperature, humidity, rainfall)
+        
+        return temperature, humidity, rainfall
+
 # Streamlit app
 def main():
+    st.set_page_config(page_title="Smart Irrigation System", page_icon="💧", layout="wide")
+    
     st.title("Smart Irrigation System Dashboard")
     
     # Initialize session state
@@ -515,8 +598,60 @@ def main():
         st.session_state.irrigation_system = SmartIrrigationSystem(num_zones=num_zones)
         st.success("System reset with new configuration")
     
+    # Zone Management Section
+    st.sidebar.header("Zone Management")
+    selected_zone = st.sidebar.selectbox(
+        "Select Zone to Edit",
+        [f"Zone {i}" for i in range(1, st.session_state.irrigation_system.num_zones + 1)]
+    )
+    zone_id = int(selected_zone.split()[1])
+    
+    # Get current zone data
+    current_zone = st.session_state.irrigation_system.zones[zone_id]
+    
+    # Zone editing form
+    with st.sidebar.form("zone_edit_form"):
+        st.subheader("Edit Zone Properties")
+        new_area = st.number_input("Area (m²)", value=current_zone['area'], min_value=1.0, step=0.1)
+        new_soil_type = st.selectbox(
+            "Soil Type",
+            ['Clay', 'Sandy', 'Loam', 'Silt', 'Peat'],
+            index=['Clay', 'Sandy', 'Loam', 'Silt', 'Peat'].index(current_zone['soil_type'])
+        )
+        new_crop_type = st.selectbox(
+            "Crop Type",
+            ['Vegetables', 'Fruits', 'Flowers', 'Lawn', 'Trees'],
+            index=['Vegetables', 'Fruits', 'Flowers', 'Lawn', 'Trees'].index(current_zone['crop_type'])
+        )
+        new_moisture_threshold = st.slider(
+            "Moisture Threshold (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=30.0,
+            step=1.0
+        )
+        
+        if st.form_submit_button("Update Zone"):
+            # Update zone in memory
+            st.session_state.irrigation_system.zones[zone_id].update({
+                'area': new_area,
+                'soil_type': new_soil_type,
+                'crop_type': new_crop_type
+            })
+            
+            # Update zone in database
+            st.session_state.irrigation_system.db.save_zone(
+                zone_id,
+                new_area,
+                new_soil_type,
+                new_crop_type,
+                new_moisture_threshold
+            )
+            
+            st.success(f"Zone {zone_id} updated successfully!")
+    
     # Main dashboard
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.subheader("Reservoir Status")
@@ -526,12 +661,23 @@ def main():
             st.session_state.irrigation_system.refill_reservoir()
     
     with col2:
+        st.subheader("Weather Conditions")
+        weather = st.session_state.irrigation_system.db.get_latest_weather_conditions()
+        if weather:
+            temperature, humidity, rainfall, recorded_at = weather
+            st.metric("Temperature", f"{temperature:.1f}°C")
+            st.metric("Humidity", f"{humidity:.1f}%")
+            st.metric("Rainfall", f"{rainfall:.1f} mm/h")
+        else:
+            st.info("No weather data available")
+    
+    with col3:
         st.subheader("System Status")
-        st.metric("Current Time", st.session_state.irrigation_system.current_time.strftime("%Y-%m-%d %H:%M"))
-        
-        if st.button("Update Moisture Levels"):
-            st.session_state.irrigation_system.update_moisture_levels()
-            st.success("Moisture levels updated")
+        status = st.session_state.irrigation_system.db.get_system_status()
+        if status:
+            reservoir_level, system_state, last_updated = status
+            st.metric("System State", system_state)
+            st.metric("Last Updated", last_updated.strftime("%Y-%m-%d %H:%M"))
     
     # Zone information
     st.subheader("Zone Information")
@@ -564,19 +710,19 @@ def main():
     
     # Manual irrigation control
     st.subheader("Manual Irrigation")
-    selected_zone = st.selectbox(
-        "Select Zone",
+    selected_zone_irrigate = st.selectbox(
+        "Select Zone to Irrigate",
         [f"Zone {i}" for i in range(1, st.session_state.irrigation_system.num_zones + 1)]
     )
-    zone_id = int(selected_zone.split()[1])
+    zone_id_irrigate = int(selected_zone_irrigate.split()[1])
     water_amount = st.number_input("Water Amount", min_value=0.0, max_value=100.0, value=10.0)
     
     if st.button("Irrigate Zone"):
-        if st.session_state.irrigation_system.irrigate_zone(zone_id, water_amount):
-            st.success(f"Zone {zone_id} irrigated with {water_amount} units of water")
+        if st.session_state.irrigation_system.irrigate_zone(zone_id_irrigate, water_amount):
+            st.success(f"Zone {zone_id_irrigate} irrigated with {water_amount} units of water")
             
             # Show irrigation path
-            path = st.session_state.irrigation_system.get_shortest_path(0, zone_id)
+            path = st.session_state.irrigation_system.get_shortest_path(0, zone_id_irrigate)
             fig = st.session_state.irrigation_system.visualize_irrigation_path(path)
             st.pyplot(fig)
     
